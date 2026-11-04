@@ -1,9 +1,10 @@
-import React, { useState, useRef } from 'react';
-import { Activity, ArrowDown, ArrowUp, Zap, Server, RefreshCw, Square } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Activity, ArrowDown, ArrowUp, Zap, Server, Square, Play } from 'lucide-react';
 
 export default function App() {
   const [serverUrl, setServerUrl] = useState('http://localhost:8000');
-  const [status, setStatus] = useState('ready'); // ready, pinging, downloading, uploading, completed, stopped, error
+  const [isRunning, setIsRunning] = useState(true); // Auto-runs continuously
+  const [phase, setPhase] = useState('ping'); // 'ping', 'download', 'upload'
   const [currentSpeed, setCurrentSpeed] = useState(0);
   const [ping, setPing] = useState(null);
   const [jitter, setJitter] = useState(null);
@@ -11,33 +12,36 @@ export default function App() {
   const [uploadSpeed, setUploadSpeed] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
 
-  // Refs for cancellation and live measurement tracking
-  const isCancelledRef = useRef(false);
+  // Refs for tracking active cancellation & loop state
+  const isRunningRef = useRef(true);
   const abortControllerRef = useRef(null);
   const xhrRef = useRef(null);
 
-  const stopTest = () => {
-    isCancelledRef.current = true;
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    if (xhrRef.current) {
-      xhrRef.current.abort();
-    }
-    setStatus('stopped');
+  // Stop / Resume handlers
+  const handleStop = () => {
+    isRunningRef.current = false;
+    setIsRunning(false);
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    if (xhrRef.current) xhrRef.current.abort();
     setCurrentSpeed(0);
   };
 
+  const handleResume = () => {
+    setErrorMessage('');
+    isRunningRef.current = true;
+    setIsRunning(true);
+  };
+
   // Ping & Jitter measurement
-  const testPing = async () => {
-    if (isCancelledRef.current) return;
-    setStatus('pinging');
+  const runPingTest = async () => {
+    if (!isRunningRef.current) return;
+    setPhase('ping');
+
     const pings = [];
-    const count = 6;
+    const count = 4;
 
     for (let i = 0; i < count; i++) {
-      if (isCancelledRef.current) return;
-
+      if (!isRunningRef.current) return;
       const start = performance.now();
       try {
         const res = await fetch(`${serverUrl}/api/ping?t=${Date.now()}`, {
@@ -48,47 +52,39 @@ export default function App() {
         const duration = performance.now() - start;
         pings.push(duration);
 
-        // Update live ping display as samples arrive
-        const currentAvg = Math.round(pings.reduce((a, b) => a + b, 0) / pings.length);
-        setPing(currentAvg);
+        // Update live ping as each probe returns
+        const avg = Math.round(pings.reduce((a, b) => a + b, 0) / pings.length);
+        setPing(avg);
 
-        await new Promise(r => setTimeout(r, 90));
+        await new Promise(r => setTimeout(r, 80));
       } catch (err) {
-        if (isCancelledRef.current) return;
+        if (!isRunningRef.current) return;
         throw new Error("Impossible de joindre le serveur. Assurez-vous que le backend tourne sur le port 8000.");
       }
     }
 
-    if (pings.length > 3) {
-      pings.sort((a, b) => a - b);
-      pings.pop();
-    }
-
-    const avgPing = pings.reduce((a, b) => a + b, 0) / pings.length;
     let jitterSum = 0;
     for (let i = 1; i < pings.length; i++) {
       jitterSum += Math.abs(pings[i] - pings[i - 1]);
     }
     const avgJitter = pings.length > 1 ? jitterSum / (pings.length - 1) : 0;
-
-    setPing(Math.round(avgPing));
     setJitter(Math.round(avgJitter));
-    return avgPing;
   };
 
-  // Download speed measurement
-  const testDownload = async () => {
-    if (isCancelledRef.current) return;
-    setStatus('downloading');
-    const sizeMb = 40; // 40 MB stream for precise real-time speed curve
-    
+  // Continuous live download stream
+  const runDownloadTest = async () => {
+    if (!isRunningRef.current) return;
+    setPhase('download');
+
+    // 25 MB chunk for each loop cycle
+    const sizeMb = 25;
     let response;
     try {
       response = await fetch(`${serverUrl}/api/download?size_mb=${sizeMb}&t=${Date.now()}`, {
         signal: abortControllerRef.current?.signal
       });
     } catch (err) {
-      if (isCancelledRef.current) return;
+      if (!isRunningRef.current) return;
       throw err;
     }
 
@@ -101,7 +97,7 @@ export default function App() {
     let lastBytes = 0;
 
     while (true) {
-      if (isCancelledRef.current) {
+      if (!isRunningRef.current) {
         try { await reader.cancel(); } catch (e) {}
         return;
       }
@@ -110,7 +106,7 @@ export default function App() {
       try {
         readResult = await reader.read();
       } catch (e) {
-        if (isCancelledRef.current) return;
+        if (!isRunningRef.current) return;
         throw e;
       }
 
@@ -120,14 +116,14 @@ export default function App() {
       receivedBytes += value.length;
       const now = performance.now();
 
-      // Update instant speed every 60ms for smooth live animation
-      if (now - lastTime > 60) {
+      // Live update every 50ms for hyper-fluid speedometer
+      if (now - lastTime > 50) {
         const deltaSec = (now - lastTime) / 1000;
         const deltaBits = (receivedBytes - lastBytes) * 8;
         const currentMbps = (deltaBits / deltaSec) / (1024 * 1024);
         const liveVal = Number(Math.max(0, currentMbps).toFixed(1));
         setCurrentSpeed(liveVal);
-        setDownloadSpeed(liveVal); // Live update in the download card too
+        setDownloadSpeed(liveVal);
         lastTime = now;
         lastBytes = receivedBytes;
       }
@@ -137,16 +133,14 @@ export default function App() {
     const finalMbps = Number(((receivedBytes * 8 / totalSeconds) / (1024 * 1024)).toFixed(2));
     setDownloadSpeed(finalMbps);
     setCurrentSpeed(finalMbps);
-    return finalMbps;
   };
 
-  // Upload speed measurement
-  const testUpload = async () => {
-    if (isCancelledRef.current) return;
-    setStatus('uploading');
-    setCurrentSpeed(0);
+  // Continuous live upload stream
+  const runUploadTest = async () => {
+    if (!isRunningRef.current) return;
+    setPhase('upload');
 
-    const totalBytes = 20 * 1024 * 1024; // 20 MB
+    const totalBytes = 15 * 1024 * 1024; // 15 MB
     const chunk = new Uint8Array(totalBytes);
 
     return new Promise((resolve, reject) => {
@@ -157,22 +151,22 @@ export default function App() {
       let lastLoaded = 0;
 
       xhr.upload.onprogress = (event) => {
-        if (isCancelledRef.current) return;
+        if (!isRunningRef.current) return;
         const now = performance.now();
-        if (now - lastTime > 60) {
+        if (now - lastTime > 50) {
           const deltaSec = (now - lastTime) / 1000;
           const deltaBits = (event.loaded - lastLoaded) * 8;
           const currentMbps = (deltaBits / deltaSec) / (1024 * 1024);
           const liveVal = Number(Math.max(0, currentMbps).toFixed(1));
           setCurrentSpeed(liveVal);
-          setUploadSpeed(liveVal); // Live update in the upload card too
+          setUploadSpeed(liveVal);
           lastTime = now;
           lastLoaded = event.loaded;
         }
       };
 
       xhr.onload = () => {
-        if (isCancelledRef.current) return;
+        if (!isRunningRef.current) return resolve(null);
         if (xhr.status >= 200 && xhr.status < 300) {
           const totalSeconds = (performance.now() - startTime) / 1000;
           const finalMbps = Number(((totalBytes * 8 / totalSeconds) / (1024 * 1024)).toFixed(2));
@@ -180,18 +174,16 @@ export default function App() {
           setCurrentSpeed(finalMbps);
           resolve(finalMbps);
         } else {
-          reject(new Error("Erreur de transfert upload"));
+          reject(new Error("Erreur de téléversement"));
         }
       };
 
       xhr.onerror = () => {
-        if (isCancelledRef.current) return;
-        reject(new Error("Échec du téléversement upload"));
+        if (!isRunningRef.current) return resolve(null);
+        reject(new Error("Échec du téléversement"));
       };
 
-      xhr.onabort = () => {
-        resolve(null);
-      };
+      xhr.onabort = () => resolve(null);
 
       xhr.open('POST', `${serverUrl}/api/upload?t=${Date.now()}`);
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
@@ -199,40 +191,46 @@ export default function App() {
     });
   };
 
-  const runFullTest = async () => {
-    isCancelledRef.current = false;
-    abortControllerRef.current = new AbortController();
-    setErrorMessage('');
-    setPing(null);
-    setJitter(null);
-    setDownloadSpeed(null);
-    setUploadSpeed(null);
-    setCurrentSpeed(0);
+  // Continuous monitoring loop: Ping -> Download -> Upload -> Repeat
+  useEffect(() => {
+    if (!isRunning) return;
 
-    try {
-      await testPing();
-      if (isCancelledRef.current) return;
-      await new Promise(r => setTimeout(r, 300));
-      if (isCancelledRef.current) return;
-      await testDownload();
-      if (isCancelledRef.current) return;
-      await new Promise(r => setTimeout(r, 300));
-      if (isCancelledRef.current) return;
-      await testUpload();
+    let isSubscribed = true;
 
-      if (!isCancelledRef.current) {
-        setStatus('completed');
+    const loop = async () => {
+      while (isRunningRef.current && isSubscribed) {
+        try {
+          abortControllerRef.current = new AbortController();
+          
+          await runPingTest();
+          if (!isRunningRef.current || !isSubscribed) break;
+          await new Promise(r => setTimeout(r, 200));
+
+          await runDownloadTest();
+          if (!isRunningRef.current || !isSubscribed) break;
+          await new Promise(r => setTimeout(r, 200));
+
+          await runUploadTest();
+          if (!isRunningRef.current || !isSubscribed) break;
+          await new Promise(r => setTimeout(r, 300));
+        } catch (err) {
+          if (!isRunningRef.current || !isSubscribed) break;
+          console.error(err);
+          setErrorMessage(err.message || 'Erreur lors de la mesure');
+          // Wait 2.5s before retrying in case backend is restarting
+          await new Promise(r => setTimeout(r, 2500));
+        }
       }
-    } catch (err) {
-      if (!isCancelledRef.current) {
-        console.error(err);
-        setErrorMessage(err.message || 'Erreur lors du test.');
-        setStatus('error');
-      }
-    }
-  };
+    };
 
-  const isTesting = status === 'pinging' || status === 'downloading' || status === 'uploading';
+    loop();
+
+    return () => {
+      isSubscribed = false;
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      if (xhrRef.current) xhrRef.current.abort();
+    };
+  }, [isRunning, serverUrl]);
 
   // Dynamic speedometer gauge limit
   const maxScale = Math.max(100, Math.ceil((currentSpeed || downloadSpeed || uploadSpeed || 0) / 50) * 50);
@@ -244,12 +242,12 @@ export default function App() {
         <h1>
           <Zap size={34} color="#00f2fe" /> SpeedTest Pro
         </h1>
-        <p>Testez votre bande passante locale et réseau en temps réel</p>
+        <p>Moniteur réseau continu en temps réel</p>
       </header>
 
-      {/* Metrics Cards */}
+      {/* Live Metrics Cards */}
       <div className="metrics-grid">
-        <div className={`metric-card ping ${status === 'pinging' ? 'active' : ''}`}>
+        <div className={`metric-card ping ${isRunning && phase === 'ping' ? 'active' : ''}`}>
           <div className="metric-icon-wrap">
             <Activity size={22} />
           </div>
@@ -265,7 +263,7 @@ export default function App() {
           )}
         </div>
 
-        <div className={`metric-card download ${status === 'downloading' ? 'active' : ''}`}>
+        <div className={`metric-card download ${isRunning && phase === 'download' ? 'active' : ''}`}>
           <div className="metric-icon-wrap">
             <ArrowDown size={22} />
           </div>
@@ -276,7 +274,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className={`metric-card upload ${status === 'uploading' ? 'active' : ''}`}>
+        <div className={`metric-card upload ${isRunning && phase === 'upload' ? 'active' : ''}`}>
           <div className="metric-icon-wrap">
             <ArrowUp size={22} />
           </div>
@@ -288,10 +286,9 @@ export default function App() {
         </div>
       </div>
 
-      {/* Modern Circular Gauge */}
+      {/* Dynamic Real-time Gauge */}
       <div className="gauge-section">
         <svg className="gauge-svg" width="300" height="190" viewBox="0 0 200 125">
-          {/* Background track */}
           <path
             d="M 20 110 A 80 80 0 0 1 180 110"
             fill="none"
@@ -299,7 +296,6 @@ export default function App() {
             strokeWidth="14"
             strokeLinecap="round"
           />
-          {/* Active progress */}
           <path
             d="M 20 110 A 80 80 0 0 1 180 110"
             fill="none"
@@ -308,7 +304,7 @@ export default function App() {
             strokeDasharray="251.3"
             strokeDashoffset={251.3 - (angle / 180) * 251.3}
             strokeLinecap="round"
-            style={{ transition: 'stroke-dashoffset 0.08s ease-out' }}
+            style={{ transition: 'stroke-dashoffset 0.06s ease-out' }}
           />
           <defs>
             <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="0%">
@@ -323,28 +319,25 @@ export default function App() {
           <div className="gauge-value">{currentSpeed.toFixed(1)}</div>
           <div className="gauge-unit">Mbps</div>
           <div className="gauge-status">
-            {status === 'ready' && 'Prêt'}
-            {status === 'pinging' && 'Calcul Ping...'}
-            {status === 'downloading' && 'Test Download en direct...'}
-            {status === 'uploading' && 'Test Upload en direct...'}
-            {status === 'completed' && 'Test Terminé'}
-            {status === 'stopped' && 'Test Interrompu'}
-            {status === 'error' && 'Erreur'}
+            {!isRunning && 'PAUSE / ARRÊTÉ'}
+            {isRunning && phase === 'ping' && 'Mesure Ping en continu...'}
+            {isRunning && phase === 'download' && 'Download en direct...'}
+            {isRunning && phase === 'upload' && 'Upload en direct...'}
           </div>
         </div>
       </div>
 
-      {/* Control Buttons (Lancer / Stop) */}
+      {/* Only Stop / Reprendre Button */}
       <div className="buttons-group">
-        {!isTesting ? (
-          <button className="action-btn" onClick={runFullTest}>
-            <RefreshCw size={20} />
-            {status === 'completed' || status === 'stopped' ? 'Recommencer le test' : 'LANCER LE TEST'}
+        {isRunning ? (
+          <button className="action-btn stop-btn" onClick={handleStop}>
+            <Square size={20} fill="currentColor" />
+            STOP
           </button>
         ) : (
-          <button className="action-btn stop-btn" onClick={stopTest}>
-            <Square size={20} fill="currentColor" />
-            ARRÊTER (STOP)
+          <button className="action-btn" onClick={handleResume}>
+            <Play size={20} fill="currentColor" />
+            REPRENDRE LE TEST
           </button>
         )}
       </div>
