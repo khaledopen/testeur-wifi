@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Activity, ArrowDown, ArrowUp, Zap, Server, Square, Play } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, Zap, Globe, HardDrive, Square, Play } from 'lucide-react';
 
 export default function App() {
-  const [serverUrl, setServerUrl] = useState('http://localhost:8000');
-  const [isRunning, setIsRunning] = useState(true); // Auto-runs continuously
+  // Modes: 'internet' (Cloudflare CDN mondial) ou 'local' (Serveur local python/node)
+  const [testMode, setTestMode] = useState('internet');
+  const [localServerUrl, setLocalServerUrl] = useState('http://localhost:8000');
+  
+  const [isRunning, setIsRunning] = useState(true);
   const [phase, setPhase] = useState('ping'); // 'ping', 'download', 'upload'
   const [currentSpeed, setCurrentSpeed] = useState(0);
   const [ping, setPing] = useState(null);
@@ -12,12 +15,11 @@ export default function App() {
   const [uploadSpeed, setUploadSpeed] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
 
-  // Refs for tracking active cancellation & loop state
   const isRunningRef = useRef(true);
   const abortControllerRef = useRef(null);
   const xhrRef = useRef(null);
 
-  // Stop / Resume handlers
+  // Stop / Resume
   const handleStop = () => {
     isRunningRef.current = false;
     setIsRunning(false);
@@ -32,34 +34,38 @@ export default function App() {
     setIsRunning(true);
   };
 
-  // Ping & Jitter measurement
+  // 1. PING & GIGUE (Jitter)
   const runPingTest = async () => {
     if (!isRunningRef.current) return;
     setPhase('ping');
 
+    const pingUrl = testMode === 'internet'
+      ? `https://speed.cloudflare.com/__down?bytes=0&t=${Date.now()}`
+      : `${localServerUrl}/api/ping?t=${Date.now()}`;
+
     const pings = [];
-    const count = 4;
+    const count = 5;
 
     for (let i = 0; i < count; i++) {
       if (!isRunningRef.current) return;
       const start = performance.now();
       try {
-        const res = await fetch(`${serverUrl}/api/ping?t=${Date.now()}`, {
+        const res = await fetch(pingUrl, {
           cache: 'no-store',
           signal: abortControllerRef.current?.signal
         });
-        if (!res.ok) throw new Error('Erreur de connexion');
+        if (!res.ok) throw new Error('Erreur de ping');
         const duration = performance.now() - start;
         pings.push(duration);
 
-        // Update live ping as each probe returns
         const avg = Math.round(pings.reduce((a, b) => a + b, 0) / pings.length);
         setPing(avg);
-
-        await new Promise(r => setTimeout(r, 80));
+        await new Promise(r => setTimeout(r, 90));
       } catch (err) {
         if (!isRunningRef.current) return;
-        throw new Error("Impossible de joindre le serveur. Assurez-vous que le backend tourne sur le port 8000.");
+        throw new Error(testMode === 'internet' 
+          ? "Impossible de joindre le serveur Cloudflare. Vérifiez votre connexion Internet."
+          : "Impossible de joindre le serveur local. Vérifiez qu'il est bien démarré sur le port 8000.");
       }
     }
 
@@ -71,16 +77,20 @@ export default function App() {
     setJitter(Math.round(avgJitter));
   };
 
-  // Continuous live download stream
+  // 2. DOWNLOAD (Débit descendant en direct)
   const runDownloadTest = async () => {
     if (!isRunningRef.current) return;
     setPhase('download');
 
-    // 25 MB chunk for each loop cycle
-    const sizeMb = 25;
+    // 25 Mo pour tester le vrai débit Internet
+    const bytesToFetch = 25 * 1024 * 1024;
+    const downloadUrl = testMode === 'internet'
+      ? `https://speed.cloudflare.com/__down?bytes=${bytesToFetch}&t=${Date.now()}`
+      : `${localServerUrl}/api/download?size_mb=25&t=${Date.now()}`;
+
     let response;
     try {
-      response = await fetch(`${serverUrl}/api/download?size_mb=${sizeMb}&t=${Date.now()}`, {
+      response = await fetch(downloadUrl, {
         signal: abortControllerRef.current?.signal
       });
     } catch (err) {
@@ -88,7 +98,7 @@ export default function App() {
       throw err;
     }
 
-    if (!response.body) throw new Error("ReadableStream non supporté");
+    if (!response.body) throw new Error("Flux réseau non supporté par le navigateur");
 
     const reader = response.body.getReader();
     let receivedBytes = 0;
@@ -116,12 +126,12 @@ export default function App() {
       receivedBytes += value.length;
       const now = performance.now();
 
-      // Live update every 50ms for hyper-fluid speedometer
+      // Rafraîchissement ultra fluide toutes les 50ms
       if (now - lastTime > 50) {
         const deltaSec = (now - lastTime) / 1000;
         const deltaBits = (receivedBytes - lastBytes) * 8;
         const currentMbps = (deltaBits / deltaSec) / (1024 * 1024);
-        const liveVal = Number(Math.max(0, currentMbps).toFixed(1));
+        const liveVal = Number(Math.max(0, currentMbps).toFixed(2));
         setCurrentSpeed(liveVal);
         setDownloadSpeed(liveVal);
         lastTime = now;
@@ -135,13 +145,18 @@ export default function App() {
     setCurrentSpeed(finalMbps);
   };
 
-  // Continuous live upload stream
+  // 3. UPLOAD (Débit montant en direct)
   const runUploadTest = async () => {
     if (!isRunningRef.current) return;
     setPhase('upload');
 
-    const totalBytes = 15 * 1024 * 1024; // 15 MB
+    // 10 Mo pour le téléversement internet
+    const totalBytes = (testMode === 'internet' ? 10 : 15) * 1024 * 1024;
     const chunk = new Uint8Array(totalBytes);
+
+    const uploadUrl = testMode === 'internet'
+      ? `https://speed.cloudflare.com/__up?t=${Date.now()}`
+      : `${localServerUrl}/api/upload?t=${Date.now()}`;
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -157,7 +172,7 @@ export default function App() {
           const deltaSec = (now - lastTime) / 1000;
           const deltaBits = (event.loaded - lastLoaded) * 8;
           const currentMbps = (deltaBits / deltaSec) / (1024 * 1024);
-          const liveVal = Number(Math.max(0, currentMbps).toFixed(1));
+          const liveVal = Number(Math.max(0, currentMbps).toFixed(2));
           setCurrentSpeed(liveVal);
           setUploadSpeed(liveVal);
           lastTime = now;
@@ -167,31 +182,31 @@ export default function App() {
 
       xhr.onload = () => {
         if (!isRunningRef.current) return resolve(null);
-        if (xhr.status >= 200 && xhr.status < 300) {
+        if (xhr.status >= 200 && xhr.status < 400) {
           const totalSeconds = (performance.now() - startTime) / 1000;
           const finalMbps = Number(((totalBytes * 8 / totalSeconds) / (1024 * 1024)).toFixed(2));
           setUploadSpeed(finalMbps);
           setCurrentSpeed(finalMbps);
           resolve(finalMbps);
         } else {
-          reject(new Error("Erreur de téléversement"));
+          resolve(null);
         }
       };
 
       xhr.onerror = () => {
         if (!isRunningRef.current) return resolve(null);
-        reject(new Error("Échec du téléversement"));
+        resolve(null); // Continue smooth loop even on upload CORS limitations
       };
 
       xhr.onabort = () => resolve(null);
 
-      xhr.open('POST', `${serverUrl}/api/upload?t=${Date.now()}`);
+      xhr.open('POST', uploadUrl);
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       xhr.send(chunk);
     });
   };
 
-  // Continuous monitoring loop: Ping -> Download -> Upload -> Repeat
+  // Boucle de mesure en continu
   useEffect(() => {
     if (!isRunning) return;
 
@@ -201,7 +216,7 @@ export default function App() {
       while (isRunningRef.current && isSubscribed) {
         try {
           abortControllerRef.current = new AbortController();
-          
+
           await runPingTest();
           if (!isRunningRef.current || !isSubscribed) break;
           await new Promise(r => setTimeout(r, 200));
@@ -212,13 +227,12 @@ export default function App() {
 
           await runUploadTest();
           if (!isRunningRef.current || !isSubscribed) break;
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 400));
         } catch (err) {
           if (!isRunningRef.current || !isSubscribed) break;
           console.error(err);
-          setErrorMessage(err.message || 'Erreur lors de la mesure');
-          // Wait 2.5s before retrying in case backend is restarting
-          await new Promise(r => setTimeout(r, 2500));
+          setErrorMessage(err.message || 'Erreur lors du test.');
+          await new Promise(r => setTimeout(r, 2000));
         }
       }
     };
@@ -230,10 +244,10 @@ export default function App() {
       if (abortControllerRef.current) abortControllerRef.current.abort();
       if (xhrRef.current) xhrRef.current.abort();
     };
-  }, [isRunning, serverUrl]);
+  }, [isRunning, testMode, localServerUrl]);
 
-  // Dynamic speedometer gauge limit
-  const maxScale = Math.max(100, Math.ceil((currentSpeed || downloadSpeed || uploadSpeed || 0) / 50) * 50);
+  // Jauge dynamique adaptée
+  const maxScale = Math.max(50, Math.ceil((currentSpeed || downloadSpeed || uploadSpeed || 0) / 20) * 20);
   const angle = Math.min(180, (currentSpeed / maxScale) * 180);
 
   return (
@@ -242,10 +256,38 @@ export default function App() {
         <h1>
           <Zap size={34} color="#00f2fe" /> SpeedTest Pro
         </h1>
-        <p>Moniteur réseau continu en temps réel</p>
+        <p>Mesure de votre vitesse Internet en temps réel</p>
       </header>
 
-      {/* Live Metrics Cards */}
+      {/* Sélecteur de Mode (Vrai Internet vs Réseau Local) */}
+      <div className="mode-toggle">
+        <button
+          className={`mode-btn ${testMode === 'internet' ? 'active' : ''}`}
+          onClick={() => {
+            setTestMode('internet');
+            setDownloadSpeed(null);
+            setUploadSpeed(null);
+            setPing(null);
+          }}
+        >
+          <Globe size={18} />
+          Internet Réel (Cloudflare CDN)
+        </button>
+        <button
+          className={`mode-btn ${testMode === 'local' ? 'active' : ''}`}
+          onClick={() => {
+            setTestMode('local');
+            setDownloadSpeed(null);
+            setUploadSpeed(null);
+            setPing(null);
+          }}
+        >
+          <HardDrive size={18} />
+          Serveur Local (PC / WiFi LAN)
+        </button>
+      </div>
+
+      {/* Cartes Métriques */}
       <div className="metrics-grid">
         <div className={`metric-card ping ${isRunning && phase === 'ping' ? 'active' : ''}`}>
           <div className="metric-icon-wrap">
@@ -267,7 +309,7 @@ export default function App() {
           <div className="metric-icon-wrap">
             <ArrowDown size={22} />
           </div>
-          <div className="metric-label">TÉLÉCHARGEMENT (DOWN)</div>
+          <div className="metric-label">TÉLÉCHARGEMENT (VITESSE RÉELLE)</div>
           <div className="metric-val">
             {downloadSpeed !== null ? downloadSpeed : '--'}
             <span className="metric-unit">Mbps</span>
@@ -278,7 +320,7 @@ export default function App() {
           <div className="metric-icon-wrap">
             <ArrowUp size={22} />
           </div>
-          <div className="metric-label">TÉLÉVERSEMENT (UP)</div>
+          <div className="metric-label">TÉLÉVERSEMENT (ENVOI)</div>
           <div className="metric-val">
             {uploadSpeed !== null ? uploadSpeed : '--'}
             <span className="metric-unit">Mbps</span>
@@ -286,7 +328,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Dynamic Real-time Gauge */}
+      {/* Jauge Speedometer */}
       <div className="gauge-section">
         <svg className="gauge-svg" width="300" height="190" viewBox="0 0 200 125">
           <path
@@ -320,14 +362,14 @@ export default function App() {
           <div className="gauge-unit">Mbps</div>
           <div className="gauge-status">
             {!isRunning && 'PAUSE / ARRÊTÉ'}
-            {isRunning && phase === 'ping' && 'Mesure Ping en continu...'}
-            {isRunning && phase === 'download' && 'Download en direct...'}
-            {isRunning && phase === 'upload' && 'Upload en direct...'}
+            {isRunning && phase === 'ping' && 'Test Latence Internet...'}
+            {isRunning && phase === 'download' && 'Download Internet en direct...'}
+            {isRunning && phase === 'upload' && 'Upload Internet en direct...'}
           </div>
         </div>
       </div>
 
-      {/* Only Stop / Reprendre Button */}
+      {/* Contrôle STOP / REPRENDRE */}
       <div className="buttons-group">
         {isRunning ? (
           <button className="action-btn stop-btn" onClick={handleStop}>
@@ -348,17 +390,19 @@ export default function App() {
         </div>
       )}
 
-      {/* Server URL Config */}
-      <div className="settings-bar">
-        <Server size={16} />
-        <span>Serveur backend :</span>
-        <input
-          type="text"
-          value={serverUrl}
-          onChange={(e) => setServerUrl(e.target.value)}
-          placeholder="http://localhost:8000"
-        />
-      </div>
+      {/* URL Serveur si mode local */}
+      {testMode === 'local' && (
+        <div className="settings-bar">
+          <HardDrive size={16} />
+          <span>Serveur backend local :</span>
+          <input
+            type="text"
+            value={localServerUrl}
+            onChange={(e) => setLocalServerUrl(e.target.value)}
+            placeholder="http://localhost:8000"
+          />
+        </div>
+      )}
     </div>
   );
 }
