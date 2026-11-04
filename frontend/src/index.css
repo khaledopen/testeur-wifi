@@ -105,7 +105,13 @@ body {
   margin-top: 8px;
 }
 
-/* Start Button */
+/* Start & Stop Buttons */
+.buttons-group {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
 .action-btn {
   background: linear-gradient(135deg, #00f2fe, #4facfe);
   color: #04101e;
@@ -127,10 +133,29 @@ body {
   box-shadow: 0 0 35px rgba(0, 242, 254, 0.7);
 }
 
+.action-btn.stop-btn {
+  background: linear-gradient(135deg, #ff416c, #ff4b2b);
+  color: #ffffff;
+  box-shadow: 0 0 25px rgba(255, 75, 43, 0.45);
+}
+
+.action-btn.stop-btn:hover:not(:disabled) {
+  box-shadow: 0 0 35px rgba(255, 75, 43, 0.75);
+}
+
 .action-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
   filter: grayscale(0.5);
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
 }
 
 /* Metric Cards */
